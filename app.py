@@ -1,14 +1,23 @@
 import os
+import re
 import secrets
 import subprocess
 import tempfile
+
+from io import BytesIO
 from pathlib import Path
 
 from flask import Flask, jsonify, request, send_file
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
+
 app = Flask(__name__)
+
+
+# =========================================================================
+# HEALTH CHECK
+# =========================================================================
 
 @app.route("/", methods=["GET"])
 def home():
@@ -25,6 +34,11 @@ def health():
         "service": "pptx-pdf-worker"
     })
 
+
+# =========================================================================
+# API KEY AUTHENTICATION
+# =========================================================================
+
 def is_authorized():
     expected_key = os.getenv("API_KEY", "")
     received_key = request.headers.get("X-API-Key", "")
@@ -36,12 +50,19 @@ def is_authorized():
     )
 
 
+# =========================================================================
+# POWERPOINT PLACEHOLDER REPLACEMENT
+# =========================================================================
+
 def replace_paragraph_text(paragraph, replacements):
     original_text = "".join(run.text for run in paragraph.runs)
     updated_text = original_text
 
     for placeholder, value in replacements.items():
-        updated_text = updated_text.replace(placeholder, value)
+        updated_text = updated_text.replace(
+            placeholder,
+            str(value or "")
+        )
 
     if updated_text != original_text:
         if paragraph.runs:
@@ -69,25 +90,11 @@ def replace_shape_text(shape, replacements):
                     replace_paragraph_text(paragraph, replacements)
 
 
-@app.get("/")
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "Python PDF API"
-    })
-
-
-@app.get("/health")
-def health():
-    return jsonify({
-        "status": "ok",
-        "service": "pptx-pdf-worker"
-    })
-
+# =========================================================================
+# GENERATE CERTIFICATE
+# =========================================================================
 
 @app.route("/generate-certificate", methods=["POST"])
-def generate_certificate():
-def generate_certificate():
 def generate_certificate():
     if not is_authorized():
         return jsonify({
@@ -101,10 +108,25 @@ def generate_certificate():
             "message": "pptx_file is required"
         }), 400
 
-    execution_id = request.form.get("execution_id", "").strip()
-    name = request.form.get("name", "").strip()
-    ic_number = request.form.get("ic_number", "").strip()
-    email = request.form.get("email", "").strip()
+    execution_id = request.form.get(
+        "execution_id",
+        ""
+    ).strip()
+
+    name = request.form.get(
+        "name",
+        ""
+    ).strip()
+
+    ic_number = request.form.get(
+        "ic_number",
+        ""
+    ).strip()
+
+    email = request.form.get(
+        "email",
+        ""
+    ).strip()
 
     if not execution_id or not name:
         return jsonify({
@@ -113,6 +135,13 @@ def generate_certificate():
         }), 400
 
     uploaded_file = request.files["pptx_file"]
+
+    # Elakkan karakter berbahaya digunakan sebagai nama fail.
+    safe_execution_id = re.sub(
+        r"[^A-Za-z0-9_.-]",
+        "_",
+        execution_id
+    )
 
     replacements = {
         "<name>": name,
@@ -128,70 +157,117 @@ def generate_certificate():
             workdir = Path(temporary_directory)
 
             input_path = workdir / "template.pptx"
-            output_pptx = workdir / f"{execution_id}.pptx"
+            output_pptx = workdir / f"{safe_execution_id}.pptx"
+            output_pdf = workdir / f"{safe_execution_id}.pdf"
 
             uploaded_file.save(input_path)
+
+            # -------------------------------------------------------------
+            # Insert participant data into PowerPoint
+            # -------------------------------------------------------------
 
             presentation = Presentation(input_path)
 
             for slide in presentation.slides:
                 for shape in slide.shapes:
-                    replace_shape_text(shape, replacements)
+                    replace_shape_text(
+                        shape,
+                        replacements
+                    )
 
             presentation.save(output_pptx)
 
-            profile_directory = workdir / "libreoffice_profile"
-profile_directory.mkdir(exist_ok=True)
+            # -------------------------------------------------------------
+            # Create separate LibreOffice profile for every request
+            # -------------------------------------------------------------
 
-profile_uri = profile_directory.resolve().as_uri()
+            profile_directory = (
+                workdir / "libreoffice_profile"
+            )
 
-subprocess.run(
-    [
-        "libreoffice",
-        f"-env:UserInstallation={profile_uri}",
-        "--headless",
-        "--nologo",
-        "--nodefault",
-        "--nofirststartwizard",
-        "--convert-to",
-        "pdf:impress_pdf_Export",
-        "--outdir",
-        str(workdir),
-        str(output_pptx)
-    ],
-    check=True,
-    capture_output=True,
-    text=True,
-    timeout=120,
-    env={
-        **os.environ,
-        "HOME": str(workdir)
-    }
-)
+            profile_directory.mkdir(
+                parents=True,
+                exist_ok=True
+            )
 
-            output_pdf = workdir / f"{execution_id}.pdf"
+            profile_uri = (
+                profile_directory
+                .resolve()
+                .as_uri()
+            )
+
+            # -------------------------------------------------------------
+            # Convert PPTX to PDF
+            # -------------------------------------------------------------
+
+            conversion_result = subprocess.run(
+                [
+                    "libreoffice",
+                    f"-env:UserInstallation={profile_uri}",
+                    "--headless",
+                    "--nologo",
+                    "--nodefault",
+                    "--nofirststartwizard",
+                    "--convert-to",
+                    "pdf:impress_pdf_Export",
+                    "--outdir",
+                    str(workdir),
+                    str(output_pptx)
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={
+                    **os.environ,
+                    "HOME": str(workdir)
+                }
+            )
 
             if not output_pdf.exists():
                 raise RuntimeError(
-                    "LibreOffice did not produce the PDF file."
+                    "LibreOffice did not produce the PDF file. "
+                    f"STDOUT: {conversion_result.stdout} "
+                    f"STDERR: {conversion_result.stderr}"
                 )
 
+            # Baca ke dalam memory sebelum TemporaryDirectory dipadam.
+            pdf_content = output_pdf.read_bytes()
+
             return send_file(
-                output_pdf,
+                BytesIO(pdf_content),
                 mimetype="application/pdf",
                 as_attachment=True,
-                download_name=f"{execution_id}.pdf"
+                download_name=f"{safe_execution_id}.pdf"
             )
 
     except subprocess.TimeoutExpired:
+        app.logger.exception(
+            "LibreOffice conversion timed out"
+        )
+
         return jsonify({
             "success": False,
             "execution_id": execution_id,
             "message": "PDF conversion timed out"
         }), 504
 
+    except subprocess.CalledProcessError as error:
+        app.logger.exception(
+            "LibreOffice conversion failed"
+        )
+
+        return jsonify({
+            "success": False,
+            "execution_id": execution_id,
+            "message": "LibreOffice conversion failed",
+            "details": error.stderr or error.stdout
+        }), 500
+
     except Exception as error:
-        app.logger.exception("PDF generation failed")
+        app.logger.exception(
+            "PDF generation failed"
+        )
 
         return jsonify({
             "success": False,

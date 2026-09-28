@@ -10,6 +10,20 @@ from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 app = Flask(__name__)
 
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Python PDF API"
+    })
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return jsonify({
+        "status": "ok",
+        "service": "pptx-pdf-worker"
+    })
 
 def is_authorized():
     expected_key = os.getenv("API_KEY", "")
@@ -71,7 +85,9 @@ def health():
     })
 
 
-@app.post("/generate-certificate")
+@app.route("/generate-certificate", methods=["POST"])
+def generate_certificate():
+def generate_certificate():
 def generate_certificate():
     if not is_authorized():
         return jsonify({

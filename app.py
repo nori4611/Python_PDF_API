@@ -140,21 +140,34 @@ def generate_certificate():
 
             presentation.save(output_pptx)
 
-            subprocess.run(
-                [
-                    "libreoffice",
-                    "--headless",
-                    "--convert-to",
-                    "pdf",
-                    "--outdir",
-                    str(workdir),
-                    str(output_pptx)
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=120
-            )
+            profile_directory = workdir / "libreoffice_profile"
+profile_directory.mkdir(exist_ok=True)
+
+profile_uri = profile_directory.resolve().as_uri()
+
+subprocess.run(
+    [
+        "libreoffice",
+        f"-env:UserInstallation={profile_uri}",
+        "--headless",
+        "--nologo",
+        "--nodefault",
+        "--nofirststartwizard",
+        "--convert-to",
+        "pdf:impress_pdf_Export",
+        "--outdir",
+        str(workdir),
+        str(output_pptx)
+    ],
+    check=True,
+    capture_output=True,
+    text=True,
+    timeout=120,
+    env={
+        **os.environ,
+        "HOME": str(workdir)
+    }
+)
 
             output_pdf = workdir / f"{execution_id}.pdf"
 
